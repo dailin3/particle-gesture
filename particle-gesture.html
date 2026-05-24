@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Particle Gesture System</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg);
+            overflow: hidden;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #canvas-container {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+        }
+        canvas { display: block; }
+
+        /* Video preview */
+        #video-preview {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            width: 180px;
+            height: 135px;
+            border-radius: 16px;
+            border: 2px solid rgba(255,255,255,0.2);
+            z-index: 10;
+            object-fit: cover;
+            transform: scaleX(-1);
+            opacity: 0.85;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            transition: opacity 0.5s;
+            background: #000;
+        }
+        #video-preview.loading {
+            opacity: 0.4;
+        }
+
+        /* Gesture indicator */
+        #gesture-indicator {
+            position: fixed;
+            top: 32px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 48px;
+            padding: 10px 28px;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: all 0.4s ease;
+        }
+        #gesture-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4757;
+            box-shadow: 0 0 12px #ff4757;
+            transition: all 0.4s ease;
+        }
+        #gesture-text {
+            text-transform: capitalize;
+            min-width: 80px;
+            text-align: center;
+        }
+
+        /* Instructions */
+        #instructions {
+            position: fixed;
+            bottom: 32px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            color: rgba(255,255,255,0.5);
+            font-size: 13px;
+            text-align: center;
+            letter-spacing: 0.5px;
+            transition: opacity 0.6s;
+        }
+
+        /* Loading overlay */
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            background: var(--bg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.6s;
+        }
+        #loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        .loader-ring {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(255,255,255,0.15);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #loading-text {
+            color: #fff;
+            margin-top: 18px;
+            font-size: 14px;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Three.js canvas -->
+    <div id="canvas-container"></div>
+
+    <!-- Video preview -->
+    <video id="video-preview" class="loading" autoplay playsinline muted></video>
+
+    <!-- Gesture indicator -->
+    <div id="gesture-indicator">
+        <div id="gesture-dot"></div>
+        <span id="gesture-text">Initializing...</span>
+    </div>
+
+    <!-- Instructions -->
+    <div id="instructions">
+        <span>🖐 Open hand = Scatter &nbsp;|&nbsp; ✊ Fist = Ball &nbsp;|&nbsp; ☝️ Index = "hello, world" &nbsp;|&nbsp; ✌️ Peace = "I'm Dailin"</span>
+        <br><span style="font-size:11px;opacity:0.7">⌨️ Keyboard fallback: keys 1 · 2 · O · C &nbsp;|&nbsp; 🖱 Drag to rotate</span>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay">
+        <div class="loader-ring"></div>
+        <div id="loading-text">Loading models...</div>
+    </div>
+
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+
+    <!-- Three.js import map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ──────────────────────────────────
+        // DOM ELEMENTS
+        // ──────────────────────────────────
+        const container = document.getElementById('canvas-container');
+        const videoPreview = document.getElementById('video-preview');
+        const gestureDot = document.getElementById('gesture-dot');
+        const gestureText = document.getElementById('gesture-text');
+        const instructions = document.getElementById('instructions');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+
+        // ──────────────────────────────────
+        // CONFIGURATION
+        // ──────────────────────────────────
+        const PARTICLE_COUNT = 12000;
+        const TRANSITION_SPEED = 0.065;
+        const GESTURE_BUFFER_SIZE = 12;
+        const DEBOUNCE_THRESHOLD = 0.55;
+
+        // ──────────────────────────────────
+        // STATE
+        // ──────────────────────────────────
+        let currentGesture = 'none';
+        let targetState = 'scattered'; // 'scattered' | 'ball' | 'textHello' | 'textQwen'
+        let gestureBuffer = [];
+        let handDetected = false;
+        let cameraReady = false;
+
+        // ──────────────────────────────────
+        // THREE.JS SETUP
+        // ──────────────────────────────────
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(
+            60, container.clientWidth / container.clientHeight, 0.5, 60
+        );
+        camera.position.set(0, 0.5, 14);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        container.appendChild(renderer.domElement);
+
+        // ──────────────────────────────────
+        // PARTICLE GROUP (for 3D rotation)
+        // ──────────────────────────────────
+        const particleGroup = new THREE.Group();
+        scene.add(particleGroup);
+
+        // ──────────────────────────────────
+        // CREATE GLOW TEXTURE
+        // ──────────────────────────────────
+        function createGlowTexture(innerColor, outerColor, size) {
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            const half = size / 2;
+            const gradient = ctx.createRadialGradient(half, half, half * 0.05, half, half, half);
+            gradient.addColorStop(0, innerColor || 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.15, innerColor || 'rgba(255,255,255,0.9)');
+            gradient.addColorStop(0.5, outerColor || 'rgba(100,180,255,0.35)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, size, size);
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        const glowTexture = createGlowTexture('rgba(255,255,255,1)', 'rgba(120,180,255,0.35)', 64);
+
+        // ──────────────────────────────────
+        // PARTICLE SYSTEM
+        // ──────────────────────────────────
+        const geometry = new THREE.BufferGeometry();
+        const currentPositionsArr = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositionsArr = new Float32Array(PARTICLE_COUNT * 3);
+        const colorsArr = new Float32Array(PARTICLE_COUNT * 3);
+        const sizesArr = new Float32Array(PARTICLE_COUNT);
+
+        // Initialize current positions randomly in a sphere
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = 6 * Math.cbrt(Math.random());
+            currentPositionsArr[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+            currentPositionsArr[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+            currentPositionsArr[i * 3 + 2] = r * Math.cos(phi);
+
+            // Initial colors: HSL based on angle
+            const hue = Math.atan2(currentPositionsArr[i * 3 + 1], currentPositionsArr[i * 3]) / (Math.PI * 2) + 0.5;
+            const col = new THREE.Color().setHSL((hue % 1 + 1) % 1, 0.75, 0.6);
+            colorsArr[i * 3] = col.r;
+            colorsArr[i * 3 + 1] = col.g;
+            colorsArr[i * 3 + 2] = col.b;
+
+            sizesArr[i] = 0.06 + Math.random() * 0.12;
+        }
+
+        // Copy initial positions as targets (will be overwritten)
+        targetPositionsArr.set(currentPositionsArr);
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(currentPositionsArr, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colorsArr, 3));
+        geometry.setAttribute('size', new THREE.BufferAttribute(sizesArr, 1));
+
+        const material = new THREE.PointsMaterial({
+            size: 0.12,
+            map: glowTexture,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.85,
+            sizeAttenuation: true,
+        });
+
+        const points = new THREE.Points(geometry, material);
+        particleGroup.add(points);
+
+        // ──────────────────────────────────
+        // AMBIENT PARTICLES (background dust)
+        // ──────────────────────────────────
+        const dustCount = 2000;
+        const dustGeo = new THREE.BufferGeometry();
+        const dustPositions = new Float32Array(dustCount * 3);
+        for (let i = 0; i < dustCount; i++) {
+            dustPositions[i * 3] = (Math.random() - 0.5) * 30;
+            dustPositions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+            dustPositions[i * 3 + 2] = (Math.random() - 0.5) * 15;
+        }
+        dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+        const dustMat = new THREE.PointsMaterial({
+            size: 0.03,
+            color: 0x8899cc,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.35,
+            sizeAttenuation: true,
+        });
+        const dustParticles = new THREE.Points(dustGeo, dustMat);
+        scene.add(dustParticles);
+
+        // ──────────────────────────────────
+        // TARGET POSITION GENERATORS
+        // ──────────────────────────────────
+
+        /** Generate evenly-distributed points on a sphere (Fibonacci sphere) */
+        function generateBallPositions(count, radius = 3.5) {
+            const arr = new Float32Array(count * 3);
+            const phi_golden = Math.PI * (3 - Math.sqrt(5));
+            for (let i = 0; i < count; i++) {
+                const y = 1 - (i / (count - 1)) * 2;
+                const radiusAtY = Math.sqrt(1 - y * y);
+                const theta = phi_golden * i;
+                arr[i * 3] = Math.cos(theta) * radiusAtY * radius;
+                arr[i * 3 + 1] = y * radius;
+                arr[i * 3 + 2] = Math.sin(theta) * radiusAtY * radius;
+            }
+            return arr;
+        }
+
+        /** Generate random positions in a spherical volume */
+        function generateScatteredPositions(count, maxRadius = 10) {
+            const arr = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const r = maxRadius * Math.cbrt(Math.random());
+                arr[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+                arr[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+                arr[i * 3 + 2] = r * Math.cos(phi);
+            }
+            return arr;
+        }
+
+        /** Generate particle positions from text rendered on a canvas */
+        function generateTextPositions(text, count, worldWidth = 9) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Determine canvas size based on text
+            canvas.width = 1024;
+            canvas.height = 256;
+
+            // Clear
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Render text (bold, large)
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 4;
+            ctx.font = 'bold 130px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            // Stroke first for thicker text, then fill
+            ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+            // Read pixel data
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const pixels = imageData.data;
+
+            // Collect text pixel coords
+            const textPixels = [];
+            const step = 3; // Sample every N pixels
+            for (let y = 0; y < canvas.height; y += step) {
+                for (let x = 0; x < canvas.width; x += step) {
+                    const idx = (y * canvas.width + x) * 4;
+                    if (pixels[idx] > 100) {
+                        textPixels.push({ x, y });
+                    }
+                }
+            }
+
+            const arr = new Float32Array(count * 3);
+            const aspectRatio = canvas.height / canvas.width;
+            const worldHeight = worldWidth * aspectRatio;
+
+            if (textPixels.length === 0) {
+                // Fallback: random sphere
+                console.warn('No text pixels found, using fallback');
+                return generateBallPositions(count, 3);
+            }
+
+            for (let i = 0; i < count; i++) {
+                const pixel = textPixels[Math.floor(Math.random() * textPixels.length)];
+
+                // Map canvas coords to world coords
+                const nx = (pixel.x / canvas.width - 0.5) * worldWidth;
+                const ny = -(pixel.y / canvas.height - 0.5) * worldHeight;
+                // Slight depth variation for 3D effect
+                const nz = (Math.random() - 0.5) * 0.6;
+
+                arr[i * 3] = nx;
+                arr[i * 3 + 1] = ny;
+                arr[i * 3 + 2] = nz;
+            }
+
+            return arr;
+        }
+
+        // ──────────────────────────────────
+        // PRE-GENERATE ALL TARGET SETS
+        // ──────────────────────────────────
+        const targetSets = {
+            scattered: generateScatteredPositions(PARTICLE_COUNT, 10),
+            ball: generateBallPositions(PARTICLE_COUNT),
+            textHello: generateTextPositions('hello, world', PARTICLE_COUNT, 10),
+            textQwen: generateTextPositions("I'm Dailin", PARTICLE_COUNT, 8),
+        };
+
+        // Start with scattered
+        targetPositionsArr.set(targetSets.scattered);
+
+        // ──────────────────────────────────
+        // UPDATE TARGET BASED ON GESTURE
+        // ──────────────────────────────────
+        function setTargetState(newState) {
+            if (!newState) return;
+
+            const stateToSet = {
+                'open': 'scattered',
+                'closed': 'ball',
+                'one': 'textHello',
+                'two': 'textQwen',
+            };
+
+            const mapped = stateToSet[newState];
+            if (mapped && mapped !== targetState) {
+                targetState = mapped;
+                targetPositionsArr.set(targetSets[mapped]);
+                updateUI(newState);
+
+                // Text mode: snap rotation to face camera for readability
+                if (mapped === 'textHello' || mapped === 'textQwen') {
+                    // Round to nearest full turn based on actual group rotation
+                    const curY = particleGroup.rotation.y;
+                    targetRotationY = Math.round(curY / (Math.PI * 2)) * Math.PI * 2;
+                    targetRotationX = 0;
+                }
+            }
+        }
+
+        function updateUI(gesture) {
+            const colors = {
+                'open': '#4ecdc4',
+                'closed': '#ff6b6b',
+                'one': '#ffe66d',
+                'two': '#a29bfe',
+                'none': '#636e72',
+            };
+            const labels = {
+                'open': 'Open Hand · Scatter',
+                'closed': 'Fist · Ball',
+                'one': '☝️ "hello, world"',
+                'two': '✌️ "I\'m Dailin"',
+                'none': 'No Hand Detected',
+            };
+            gestureDot.style.background = colors[gesture] || colors['none'];
+            gestureDot.style.boxShadow = `0 0 14px ${colors[gesture] || colors['none']}`;
+            gestureText.textContent = labels[gesture] || labels['none'];
+        }
+
+        // ──────────────────────────────────
+        // GESTURE DETECTION
+        // ──────────────────────────────────
+
+        /** Calculate angle at PIP joint to determine if finger is extended */
+        function getFingerExtensionAngles(landmarks) {
+            const fingers = [
+                { mcp: 5, pip: 6, tip: 8 },   // index
+                { mcp: 9, pip: 10, tip: 12 },  // middle
+                { mcp: 13, pip: 14, tip: 16 }, // ring
+                { mcp: 17, pip: 18, tip: 20 }, // pinky
+            ];
+
+            return fingers.map(f => {
+                const a = landmarks[f.mcp];
+                const b = landmarks[f.pip];
+                const c = landmarks[f.tip];
+
+                const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+                const bc = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
+
+                const magAB = Math.sqrt(ab.x * ab.x + ab.y * ab.y + ab.z * ab.z);
+                const magBC = Math.sqrt(bc.x * bc.x + bc.y * bc.y + bc.z * bc.z);
+
+                if (magAB < 1e-6 || magBC < 1e-6) return Math.PI;
+
+                const dot = ab.x * bc.x + ab.y * bc.y + ab.z * bc.z;
+                const cosAngle = Math.max(-1, Math.min(1, dot / (magAB * magBC)));
+                return Math.acos(cosAngle);
+            });
+        }
+
+        /** Check if thumb is extended */
+        function isThumbExtended(landmarks) {
+            const wrist = landmarks[0];
+            const thumbTip = landmarks[4];
+            const thumbMCP = landmarks[2];
+
+            const dTip = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y, thumbTip.z - wrist.z);
+            const dMCP = Math.hypot(thumbMCP.x - wrist.x, thumbMCP.y - wrist.y, thumbMCP.z - wrist.z);
+
+            return dTip > dMCP * 1.35;
+        }
+
+        /** Classify gesture from landmarks */
+        function classifyGesture(landmarks) {
+            if (!landmarks || landmarks.length < 21) return null;
+
+            const angles = getFingerExtensionAngles(landmarks);
+            const EXTEND_THRESHOLD = 0.65; // radians (~37°)
+
+            const [indexExt, middleExt, ringExt, pinkyExt] = angles.map(a => a < EXTEND_THRESHOLD);
+            const thumbExt = isThumbExtended(landmarks);
+
+            // Priority: specific gestures first
+            // "1" gesture: only index up (others + thumb curled)
+            if (indexExt && !middleExt && !ringExt && !pinkyExt) {
+                return 'one';
+            }
+
+            // "2" gesture: index + middle up (others curled)
+            if (indexExt && middleExt && !ringExt && !pinkyExt) {
+                return 'two';
+            }
+
+            // Open hand: all digits extended
+            const allFingersExt = indexExt && middleExt && ringExt && pinkyExt;
+            if (allFingersExt && thumbExt) {
+                return 'open';
+            }
+
+            // Closed fist: all digits curled
+            const allCurled = !indexExt && !middleExt && !ringExt && !pinkyExt && !thumbExt;
+            if (allCurled) {
+                return 'closed';
+            }
+
+            // Partial open (some fingers extended) — treat as open-ish
+            const extendedCount = [indexExt, middleExt, ringExt, pinkyExt, thumbExt].filter(Boolean).length;
+            if (extendedCount >= 4) return 'open';
+            if (extendedCount <= 1) return 'closed';
+
+            return null; // ambiguous
+        }
+
+        /** Add gesture to buffer and return debounced result */
+        function processGesture(rawGesture) {
+            gestureBuffer.push(rawGesture);
+            if (gestureBuffer.length > GESTURE_BUFFER_SIZE) {
+                gestureBuffer.shift();
+            }
+
+            // Count occurrences
+            const counts = {};
+            for (const g of gestureBuffer) {
+                if (g) counts[g] = (counts[g] || 0) + 1;
+            }
+
+            // Find dominant gesture
+            let maxCount = 0;
+            let dominant = null;
+            for (const [g, c] of Object.entries(counts)) {
+                if (c > maxCount) {
+                    maxCount = c;
+                    dominant = g;
+                }
+            }
+
+            if (maxCount >= gestureBuffer.length * DEBOUNCE_THRESHOLD) {
+                return dominant;
+            }
+            return null;
+        }
+
+        // ──────────────────────────────────
+        // MEDIAPIPE HANDS
+        // ──────────────────────────────────
+        let handsInstance = null;
+        let cameraUtils = null;
+
+        function onHandsResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                const landmarks = results.multiHandLandmarks[0];
+                const rawGesture = classifyGesture(landmarks);
+                const debounced = processGesture(rawGesture);
+
+                if (debounced && debounced !== currentGesture) {
+                    currentGesture = debounced;
+                    setTargetState(debounced);
+                }
+            } else {
+                handDetected = false;
+                // When hand disappears, gradually fade to current state
+                gestureBuffer.push(null);
+                if (gestureBuffer.length > GESTURE_BUFFER_SIZE) {
+                    gestureBuffer.shift();
+                }
+            }
+        }
+
+        async function setupMediaPipe() {
+            loadingText.textContent = 'Loading hand tracking model...';
+
+            handsInstance = new Hands({
+                locateFile: (file) =>
+                    `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+            });
+
+            handsInstance.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.5,
+            });
+
+            handsInstance.onResults(onHandsResults);
+
+            // Setup camera
+            cameraUtils = new Camera(videoPreview, {
+                onFrame: async () => {
+                    if (handsInstance && cameraReady) {
+                        await handsInstance.send({ image: videoPreview });
+                    }
+                },
+                width: 640,
+                height: 480,
+            });
+
+            try {
+                await cameraUtils.start();
+                cameraReady = true;
+                videoPreview.classList.remove('loading');
+                loadingText.textContent = 'Ready!';
+                setTimeout(() => {
+                    loadingOverlay.classList.add('hidden');
+                }, 600);
+            } catch (err) {
+                console.warn('Camera not available:', err.message);
+                loadingText.textContent = 'Camera unavailable — using keyboard mode';
+                videoPreview.style.display = 'none';
+                setTimeout(() => {
+                    loadingOverlay.classList.add('hidden');
+                }, 1000);
+            }
+        }
+
+        // ──────────────────────────────────
+        // MOUSE ROTATION
+        // ──────────────────────────────────
+        let isDragging = false;
+        let prevMouse = { x: 0, y: 0 };
+        let rotationVelocity = { x: 0, y: 0 };
+        let targetRotationX = 0;
+        let targetRotationY = 0;
+        const autoRotateSpeed = 0.3; // radians per second
+
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            isDragging = true;
+            prevMouse.x = e.clientX;
+            prevMouse.y = e.clientY;
+            rotationVelocity.x = 0;
+            rotationVelocity.y = 0;
+        });
+
+        window.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - prevMouse.x;
+            const dy = e.clientY - prevMouse.y;
+            rotationVelocity.y = dx * 0.005;
+            rotationVelocity.x = dy * 0.005;
+            targetRotationY += rotationVelocity.y;
+            targetRotationX += rotationVelocity.x;
+            targetRotationX = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, targetRotationX));
+            prevMouse.x = e.clientX;
+            prevMouse.y = e.clientY;
+        });
+
+        window.addEventListener('pointerup', () => {
+            isDragging = false;
+        });
+
+        // Touch support
+        renderer.domElement.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                isDragging = true;
+                prevMouse.x = e.touches[0].clientX;
+                prevMouse.y = e.touches[0].clientY;
+                rotationVelocity.x = 0;
+                rotationVelocity.y = 0;
+            }
+        }, { passive: false });
+
+        window.addEventListener('touchmove', (e) => {
+            if (!isDragging || e.touches.length !== 1) return;
+            const dx = e.touches[0].clientX - prevMouse.x;
+            const dy = e.touches[0].clientY - prevMouse.y;
+            rotationVelocity.y = dx * 0.005;
+            rotationVelocity.x = dy * 0.005;
+            targetRotationY += rotationVelocity.y;
+            targetRotationX += rotationVelocity.x;
+            targetRotationX = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, targetRotationX));
+            prevMouse.x = e.touches[0].clientX;
+            prevMouse.y = e.touches[0].clientY;
+        }, { passive: false });
+
+        window.addEventListener('touchend', () => {
+            isDragging = false;
+        });
+
+        // ──────────────────────────────────
+        // KEYBOARD FALLBACK
+        // ──────────────────────────────────
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            const gestureMap = {
+                'o': 'open',
+                'c': 'closed',
+                '1': 'one',
+                '2': 'two',
+            };
+            if (gestureMap[key]) {
+                e.preventDefault();
+                currentGesture = gestureMap[key];
+                setTargetState(currentGesture);
+                // Flash indicator
+                gestureDot.style.transform = 'scale(1.6)';
+                setTimeout(() => { gestureDot.style.transform = 'scale(1)'; }, 200);
+            }
+        });
+
+        // ──────────────────────────────────
+        // RESIZE HANDLER
+        // ──────────────────────────────────
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+
+        // ──────────────────────────────────
+        // ANIMATION LOOP
+        // ──────────────────────────────────
+        const clock = new THREE.Clock();
+
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            const dt = Math.min(clock.getDelta(), 0.1);
+            const time = timestamp * 0.001;
+
+            // ── Update particle positions (lerp toward targets) ──
+            const speed = TRANSITION_SPEED;
+            let maxDelta = 0;
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                const delta = targetPositionsArr[i] - currentPositionsArr[i];
+                currentPositionsArr[i] += delta * speed;
+                if (Math.abs(delta) > maxDelta) maxDelta = Math.abs(delta);
+            }
+
+            // Add subtle wave when in text mode
+            if (targetState === 'textHello' || targetState === 'textQwen') {
+                const waveAmplitude = 0.15;
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const x = currentPositionsArr[i * 3];
+                    const y = currentPositionsArr[i * 3 + 1];
+                    const wave = Math.sin(x * 1.8 + time * 2.5) * Math.cos(y * 2.2 + time * 1.8) * waveAmplitude;
+                    currentPositionsArr[i * 3 + 2] += (targetPositionsArr[i * 3 + 2] + wave - currentPositionsArr[i * 3 + 2]) * 0.04;
+                }
+            }
+
+            // Add subtle pulse when in ball mode
+            if (targetState === 'ball') {
+                const pulseAmount = 0.08 * Math.sin(time * 1.5);
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const dist = Math.sqrt(
+                        currentPositionsArr[i * 3] ** 2 +
+                        currentPositionsArr[i * 3 + 1] ** 2 +
+                        currentPositionsArr[i * 3 + 2] ** 2
+                    );
+                    if (dist > 0.001) {
+                        const factor = 1 + pulseAmount / Math.max(dist, 0.1);
+                        currentPositionsArr[i * 3] *= (1 + (factor - 1) * 0.03);
+                        currentPositionsArr[i * 3 + 1] *= (1 + (factor - 1) * 0.03);
+                        currentPositionsArr[i * 3 + 2] *= (1 + (factor - 1) * 0.03);
+                    }
+                }
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+
+            // ── Auto-rotation ──
+            if (!isDragging) {
+                // Slow rotation in text mode so user can read
+                const isTextMode = targetState === 'textHello' || targetState === 'textQwen';
+                const speed = isTextMode ? autoRotateSpeed * 0.25 : autoRotateSpeed;
+                targetRotationY += speed * dt;
+                // Vertical oscillation (disabled in text mode for stability)
+                if (!isTextMode) {
+                    targetRotationX += Math.sin(time * 0.4) * 0.003;
+                    targetRotationX = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, targetRotationX));
+                }
+            }
+
+            // Smooth rotation
+            particleGroup.rotation.y += (targetRotationY - particleGroup.rotation.y) * 0.05;
+            particleGroup.rotation.x += (targetRotationX - particleGroup.rotation.x) * 0.05;
+
+            // ── Animate background dust ──
+            dustParticles.rotation.y += dt * 0.08;
+            dustParticles.rotation.x += dt * 0.04;
+
+            // ── Dynamic material size based on state ──
+            const targetSize = {
+                'scattered': 0.14,
+                'ball': 0.10,
+                'textHello': 0.07,
+                'textQwen': 0.07,
+            };
+            const desiredSize = targetSize[targetState] || 0.12;
+            material.size += (desiredSize - material.size) * 0.06;
+
+            // ── Dynamic color tint based on state (throttled to every 3 frames) ──
+            if (Math.floor(time * 60) % 3 === 0) {
+                const tintColors = {
+                    'scattered': new THREE.Color('#4ecdc4'),
+                    'ball': new THREE.Color('#ff6b6b'),
+                    'textHello': new THREE.Color('#ffe66d'),
+                    'textQwen': new THREE.Color('#a29bfe'),
+                };
+                const targetTint = tintColors[targetState] || new THREE.Color('#ffffff');
+
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const baseHue = (i / PARTICLE_COUNT + time * 0.02) % 1;
+                    const baseCol = new THREE.Color().setHSL(baseHue, 0.5, 0.6);
+                    const blended = baseCol.lerp(targetTint, 0.3);
+                    colorsArr[i * 3] += (blended.r - colorsArr[i * 3]) * 0.06;
+                    colorsArr[i * 3 + 1] += (blended.g - colorsArr[i * 3 + 1]) * 0.06;
+                    colorsArr[i * 3 + 2] += (blended.b - colorsArr[i * 3 + 2]) * 0.06;
+                }
+                geometry.attributes.color.needsUpdate = true;
+            }
+
+            // ── Render ──
+            renderer.render(scene, camera);
+
+            // ── Hide instructions after some time ──
+            if (time > 15 && instructions.style.opacity !== '0') {
+                instructions.style.transition = 'opacity 2s';
+                instructions.style.opacity = '0';
+            }
+        }
+
+        // ──────────────────────────────────
+        // INITIALIZATION
+        // ──────────────────────────────────
+        async function init() {
+            // Setup MediaPipe (non-blocking)
+            setupMediaPipe().catch(err => {
+                console.warn('MediaPipe initialization failed:', err);
+                loadingText.textContent = 'Using keyboard mode';
+                setTimeout(() => loadingOverlay.classList.add('hidden'), 1000);
+            });
+
+            // Start animation immediately (works without camera)
+            updateUI('none');
+            requestAnimationFrame(animate);
+
+            // Show instructions briefly
+            setTimeout(() => {
+                if (instructions.style.opacity !== '0') {
+                    instructions.style.opacity = '1';
+                }
+            }, 500);
+        }
+
+        init();
+
+        console.log('🚀 3D Particle Gesture System ready');
+        console.log('   Gestures: Open hand ✋ | Fist ✊ | Index ☝️ | Peace ✌️');
+        console.log('   Keyboard: O | C | 1 | 2');
+        console.log('   Mouse: Drag to rotate view');
+    </script>
+</body>
+</html>
