@@ -187,6 +187,7 @@
         const TRANSITION_SPEED = 0.065;
         const GESTURE_BUFFER_SIZE = 12;
         const DEBOUNCE_THRESHOLD = 0.55;
+        const MISSING_HAND_FRAME_THRESHOLD = 8;
 
         // ──────────────────────────────────
         // STATE
@@ -196,6 +197,7 @@
         let gestureBuffer = [];
         let handDetected = false;
         let cameraReady = false;
+        let missingHandFrames = 0;
 
         // ──────────────────────────────────
         // THREE.JS SETUP
@@ -444,10 +446,15 @@
             };
 
             const mapped = stateToSet[newState];
-            if (mapped && mapped !== targetState) {
+            if (mapped) {
+                const stateChanged = mapped !== targetState;
+
+                updateUI(newState);
+
+                if (!stateChanged) return;
+
                 targetState = mapped;
                 targetPositionsArr.set(targetSets[mapped]);
-                updateUI(newState);
 
                 // Text mode: snap rotation to face camera for readability
                 if (mapped === 'textHello' || mapped === 'textQwen') {
@@ -602,6 +609,7 @@
         function onHandsResults(results) {
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 handDetected = true;
+                missingHandFrames = 0;
                 const landmarks = results.multiHandLandmarks[0];
                 const rawGesture = classifyGesture(landmarks);
                 const debounced = processGesture(rawGesture);
@@ -631,6 +639,13 @@
             } else {
                 handDetected = false;
                 prevHandPos = null; // reset so next detection doesn't jump
+                missingHandFrames += 1;
+
+                if (missingHandFrames >= MISSING_HAND_FRAME_THRESHOLD && currentGesture !== 'none') {
+                    currentGesture = 'none';
+                    updateUI('none');
+                }
+
                 // When hand disappears, gradually fade to current state
                 gestureBuffer.push(null);
                 if (gestureBuffer.length > GESTURE_BUFFER_SIZE) {
